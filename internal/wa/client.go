@@ -197,6 +197,21 @@ func (c *Client) SendProtoMessage(ctx context.Context, to types.JID, msg *waProt
 	return resp.ID, nil
 }
 
+func (c *Client) SendPoll(ctx context.Context, to types.JID, question string, options []string, selectableCount int) (types.MessageID, error) {
+	c.mu.Lock()
+	cli := c.client
+	c.mu.Unlock()
+	if cli == nil || !cli.IsConnected() {
+		return "", fmt.Errorf("not connected")
+	}
+	msg := cli.BuildPollCreation(question, options, selectableCount)
+	resp, err := cli.SendMessage(ctx, to, msg)
+	if err != nil {
+		return "", err
+	}
+	return resp.ID, nil
+}
+
 func (c *Client) Upload(ctx context.Context, data []byte, mediaType whatsmeow.MediaType) (whatsmeow.UploadResponse, error) {
 	c.mu.Lock()
 	cli := c.client
@@ -215,6 +230,16 @@ func (c *Client) DecryptReaction(ctx context.Context, reaction *events.Message) 
 		return nil, fmt.Errorf("not connected")
 	}
 	return cli.DecryptReaction(ctx, reaction)
+}
+
+func (c *Client) DecryptPollVote(ctx context.Context, vote *events.Message) (*waProto.PollVoteMessage, error) {
+	c.mu.Lock()
+	cli := c.client
+	c.mu.Unlock()
+	if cli == nil || !cli.IsConnected() {
+		return nil, fmt.Errorf("not connected")
+	}
+	return cli.DecryptPollVote(ctx, vote)
 }
 
 func (c *Client) RequestHistorySyncOnDemand(ctx context.Context, lastKnown types.MessageInfo, count int) (types.MessageID, error) {

@@ -21,6 +21,12 @@ type Media struct {
 	FileLength    uint64
 }
 
+type PollCreation struct {
+	Question        string
+	Options         []string
+	SelectableCount int
+}
+
 type ParsedMessage struct {
 	Chat           types.JID
 	ID             string
@@ -34,6 +40,9 @@ type ParsedMessage struct {
 	ReplyToDisplay string
 	ReactionToID   string
 	ReactionEmoji  string
+	Poll           *PollCreation
+	IsPollVote     bool
+	PollVoteRaw    *events.Message
 }
 
 func ParseLiveMessage(evt *events.Message) ParsedMessage {
@@ -46,6 +55,13 @@ func ParseLiveMessage(evt *events.Message) ParsedMessage {
 	}
 	if s := evt.Info.Sender.String(); s != "" {
 		msg.SenderJID = s
+	}
+
+	// Detect poll votes (need special handling for decryption)
+	if evt.Message != nil && evt.Message.GetPollUpdateMessage() != nil {
+		msg.IsPollVote = true
+		msg.PollVoteRaw = evt
+		msg.Text = "[Vote]"
 	}
 
 	extractWAProto(evt.Message, &msg)
@@ -178,6 +194,21 @@ func extractWAProto(m *waProto.Message, pm *ParsedMessage) {
 			FileSHA256:    clone(sticker.GetFileSHA256()),
 			FileEncSHA256: clone(sticker.GetFileEncSHA256()),
 			FileLength:    sticker.GetFileLength(),
+		}
+	}
+
+	if pollCreate := m.GetPollCreationMessage(); pollCreate != nil {
+		options := make([]string, len(pollCreate.GetOptions()))
+		for i, opt := range pollCreate.GetOptions() {
+			options[i] = opt.GetOptionName()
+		}
+		pm.Poll = &PollCreation{
+			Question:        pollCreate.GetName(),
+			Options:         options,
+			SelectableCount: int(pollCreate.GetSelectableOptionsCount()),
+		}
+		if pm.Text == "" {
+			pm.Text = "[Poll] " + pollCreate.GetName()
 		}
 	}
 

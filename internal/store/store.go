@@ -137,6 +137,53 @@ func (d *DB) ensureSchema() error {
 
 		CREATE INDEX IF NOT EXISTS idx_messages_chat_ts ON messages(chat_jid, ts);
 		CREATE INDEX IF NOT EXISTS idx_messages_ts ON messages(ts);
+
+		CREATE TABLE IF NOT EXISTS polls (
+			chat_jid TEXT NOT NULL,
+			msg_id TEXT NOT NULL,
+			question TEXT NOT NULL,
+			selectable_count INTEGER NOT NULL,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (chat_jid, msg_id),
+			FOREIGN KEY (chat_jid) REFERENCES chats(jid) ON DELETE CASCADE
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_polls_chat ON polls(chat_jid);
+
+		CREATE TABLE IF NOT EXISTS poll_options (
+			chat_jid TEXT NOT NULL,
+			msg_id TEXT NOT NULL,
+			option_index INTEGER NOT NULL,
+			option_name TEXT NOT NULL,
+			option_hash BLOB NOT NULL,
+			PRIMARY KEY (chat_jid, msg_id, option_index),
+			FOREIGN KEY (chat_jid, msg_id) REFERENCES polls(chat_jid, msg_id) ON DELETE CASCADE
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_poll_options_hash ON poll_options(chat_jid, msg_id, option_hash);
+
+		CREATE TABLE IF NOT EXISTS poll_votes (
+			chat_jid TEXT NOT NULL,
+			msg_id TEXT NOT NULL,
+			voter_jid TEXT NOT NULL,
+			voted_at INTEGER NOT NULL,
+			PRIMARY KEY (chat_jid, msg_id, voter_jid),
+			FOREIGN KEY (chat_jid, msg_id) REFERENCES polls(chat_jid, msg_id) ON DELETE CASCADE
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_poll_votes_poll ON poll_votes(chat_jid, msg_id);
+
+		CREATE TABLE IF NOT EXISTS poll_vote_selections (
+			chat_jid TEXT NOT NULL,
+			msg_id TEXT NOT NULL,
+			voter_jid TEXT NOT NULL,
+			option_index INTEGER NOT NULL,
+			PRIMARY KEY (chat_jid, msg_id, voter_jid, option_index),
+			FOREIGN KEY (chat_jid, msg_id, voter_jid) REFERENCES poll_votes(chat_jid, msg_id, voter_jid) ON DELETE CASCADE,
+			FOREIGN KEY (chat_jid, msg_id, option_index) REFERENCES poll_options(chat_jid, msg_id, option_index) ON DELETE CASCADE
+		);
+
+		CREATE INDEX IF NOT EXISTS idx_poll_vote_selections_poll ON poll_vote_selections(chat_jid, msg_id);
 	`); err != nil {
 		return fmt.Errorf("create tables: %w", err)
 	}
@@ -353,6 +400,30 @@ type Contact struct {
 	Alias     string
 	Tags      []string
 	UpdatedAt time.Time
+}
+
+type PollResults struct {
+	ChatJID         string
+	MsgID           string
+	Question        string
+	SelectableCount int
+	CreatedAt       time.Time
+	Options         []PollOption
+	Votes           []PollVote
+}
+
+type PollOption struct {
+	Index     int
+	Name      string
+	Hash      []byte
+	VoteCount int
+}
+
+type PollVote struct {
+	VoterJID        string
+	VoterName       string
+	SelectedIndices []int
+	VotedAt         time.Time
 }
 
 func unix(t time.Time) int64 {
@@ -1039,6 +1110,200 @@ func (d *DB) AddTag(jid, tag string) error {
 func (d *DB) RemoveTag(jid, tag string) error {
 	_, err := d.sql.Exec(`DELETE FROM contact_tags WHERE jid = ? AND tag = ?`, jid, tag)
 	return err
+}
+
+// --- Poll operations ---
+
+func (d *DB) UpsertPoll(chatJID, msgID, question string, selectableCount int, createdAt time.Time) error {
+	_, err := d.sql.Exec(`
+		INSERT INTO polls(chat_jid, msg_id, question, selectable_count, created_at)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(chat_jid, msg_id) DO UPDATE SET
+			question=excluded.question,
+			selectable_count=excluded.selectable_count
+	`, chatJID, msgID, question, selectableCount, unix(createdAt))
+	return err
+}
+
+func (d *DB) UpsertPollOption(chatJID, msgID string, index int, name string, hash []byte) error {
+	_, err := d.sql.Exec(`
+		INSERT INTO poll_options(chat_jid, msg_id, option_index, option_name, option_hash)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(chat_jid, msg_id, option_index) DO UPDATE SET
+			option_name=excluded.option_name,
+			option_hash=excluded.option_hash
+	`, chatJID, msgID, index, name, hash)
+	return err
+}
+
+func (d *DB) UpsertPollVote(chatJID, msgID, voterJID string, optionIndices []int, votedAt time.Time) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// First, delete old selections (in case of vote changes)
+	if _, err = tx.Exec(`DELETE FROM poll_vote_selections WHERE chat_jid = ? AND msg_id = ? AND voter_jid = ?`,
+		chatJID, msgID, voterJID); err != nil {
+		return err
+	}
+
+	// Upsert the vote record
+	if _, err = tx.Exec(`
+		INSERT INTO poll_votes(chat_jid, msg_id, voter_jid, voted_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(chat_jid, msg_id, voter_jid) DO UPDATE SET voted_at=excluded.voted_at
+	`, chatJID, msgID, voterJID, unix(votedAt)); err != nil {
+		return err
+	}
+
+	// Insert the selections
+	stmt, err := tx.Prepare(`INSERT INTO poll_vote_selections(chat_jid, msg_id, voter_jid, option_index) VALUES(?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, idx := range optionIndices {
+		if _, err = stmt.Exec(chatJID, msgID, voterJID, idx); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
+func (d *DB) LookupOptionByHash(chatJID, msgID string, hash []byte) (int, string, error) {
+	row := d.sql.QueryRow(`
+		SELECT option_index, option_name
+		FROM poll_options
+		WHERE chat_jid = ? AND msg_id = ? AND option_hash = ?
+	`, chatJID, msgID, hash)
+
+	var index int
+	var name string
+	if err := row.Scan(&index, &name); err != nil {
+		return -1, "", err
+	}
+	return index, name, nil
+}
+
+func (d *DB) GetPollResults(chatJID, msgID string) (PollResults, error) {
+	// Get poll metadata
+	row := d.sql.QueryRow(`
+		SELECT question, selectable_count, created_at
+		FROM polls
+		WHERE chat_jid = ? AND msg_id = ?
+	`, chatJID, msgID)
+
+	var results PollResults
+	var createdAt int64
+	if err := row.Scan(&results.Question, &results.SelectableCount, &createdAt); err != nil {
+		return PollResults{}, err
+	}
+	results.ChatJID = chatJID
+	results.MsgID = msgID
+	results.CreatedAt = fromUnix(createdAt)
+
+	// Get options
+	optRows, err := d.sql.Query(`
+		SELECT option_index, option_name, option_hash
+		FROM poll_options
+		WHERE chat_jid = ? AND msg_id = ?
+		ORDER BY option_index
+	`, chatJID, msgID)
+	if err != nil {
+		return PollResults{}, err
+	}
+	defer optRows.Close()
+
+	optionsMap := make(map[int]PollOption)
+	for optRows.Next() {
+		var opt PollOption
+		if err := optRows.Scan(&opt.Index, &opt.Name, &opt.Hash); err != nil {
+			return PollResults{}, err
+		}
+		opt.VoteCount = 0
+		optionsMap[opt.Index] = opt
+	}
+	if err := optRows.Err(); err != nil {
+		return PollResults{}, err
+	}
+
+	// Get votes
+	voteRows, err := d.sql.Query(`
+		SELECT voter_jid, voted_at
+		FROM poll_votes
+		WHERE chat_jid = ? AND msg_id = ?
+		ORDER BY voted_at DESC
+	`, chatJID, msgID)
+	if err != nil {
+		return PollResults{}, err
+	}
+	defer voteRows.Close()
+
+	var votes []PollVote
+	for voteRows.Next() {
+		var vote PollVote
+		var votedAt int64
+		if err := voteRows.Scan(&vote.VoterJID, &votedAt); err != nil {
+			return PollResults{}, err
+		}
+		vote.VotedAt = fromUnix(votedAt)
+
+		// Get selections for this vote
+		selRows, err := d.sql.Query(`
+			SELECT option_index
+			FROM poll_vote_selections
+			WHERE chat_jid = ? AND msg_id = ? AND voter_jid = ?
+			ORDER BY option_index
+		`, chatJID, msgID, vote.VoterJID)
+		if err != nil {
+			return PollResults{}, err
+		}
+
+		var selections []int
+		for selRows.Next() {
+			var idx int
+			if err := selRows.Scan(&idx); err != nil {
+				selRows.Close()
+				return PollResults{}, err
+			}
+			selections = append(selections, idx)
+			// Increment vote count for this option
+			if opt, ok := optionsMap[idx]; ok {
+				opt.VoteCount++
+				optionsMap[idx] = opt
+			}
+		}
+		selRows.Close()
+		if err := selRows.Err(); err != nil {
+			return PollResults{}, err
+		}
+
+		vote.SelectedIndices = selections
+		votes = append(votes, vote)
+	}
+	if err := voteRows.Err(); err != nil {
+		return PollResults{}, err
+	}
+
+	// Convert options map to slice
+	var options []PollOption
+	for i := 0; i < len(optionsMap); i++ {
+		if opt, ok := optionsMap[i]; ok {
+			options = append(options, opt)
+		}
+	}
+
+	results.Options = options
+	results.Votes = votes
+	return results, nil
 }
 
 func (d *DB) HasFTS() bool { return d.ftsEnabled }

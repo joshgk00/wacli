@@ -38,11 +38,13 @@ type WAClient interface {
 	LeaveGroup(ctx context.Context, group types.JID) error
 
 	SendText(ctx context.Context, to types.JID, text string) (types.MessageID, error)
+	SendPoll(ctx context.Context, to types.JID, question string, options []string, selectableCount int) (types.MessageID, error)
 	SendProtoMessage(ctx context.Context, to types.JID, msg *waProto.Message) (types.MessageID, error)
 	Upload(ctx context.Context, data []byte, mediaType whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
 	DownloadMediaToFile(ctx context.Context, directPath string, encFileHash, fileHash, mediaKey []byte, fileLength uint64, mediaType, mmsType string, targetPath string) (int64, error)
 
 	DecryptReaction(ctx context.Context, reaction *events.Message) (*waProto.ReactionMessage, error)
+	DecryptPollVote(ctx context.Context, vote *events.Message) (*waProto.PollVoteMessage, error)
 	RequestHistorySyncOnDemand(ctx context.Context, lastKnown types.MessageInfo, count int) (types.MessageID, error)
 	Logout(ctx context.Context) error
 }

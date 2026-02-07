@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"strings"
@@ -93,6 +94,12 @@ func (a *App) Sync(ctx context.Context, opts SyncOptions) (SyncResult, error) {
 							pm.ReactionToID = key.GetID()
 						}
 					}
+				}
+			}
+			// Handle poll votes (decrypt before storing)
+			if pm.IsPollVote && pm.PollVoteRaw != nil {
+				if err := a.handlePollVote(ctx, pm); err != nil {
+					fmt.Fprintf(os.Stderr, "\nWarning: failed to handle poll vote: %v\n", err)
 				}
 			}
 			if err := a.storeParsedMessage(ctx, pm); err == nil {
@@ -307,7 +314,7 @@ func (a *App) storeParsedMessage(ctx context.Context, pm wa.ParsedMessage) error
 
 	displayText := a.buildDisplayText(ctx, pm)
 
-	return a.db.UpsertMessage(store.UpsertMessageParams{
+	if err := a.db.UpsertMessage(store.UpsertMessageParams{
 		ChatJID:       chatJID,
 		ChatName:      chatName,
 		MsgID:         pm.ID,
@@ -326,7 +333,27 @@ func (a *App) storeParsedMessage(ctx context.Context, pm wa.ParsedMessage) error
 		FileSHA256:    fileSha,
 		FileEncSHA256: fileEncSha,
 		FileLength:    fileLen,
-	})
+	}); err != nil {
+		return err
+	}
+
+	// Handle poll creation
+	if pm.Poll != nil {
+		if err := a.db.UpsertPoll(chatJID, pm.ID, pm.Poll.Question, pm.Poll.SelectableCount, pm.Timestamp); err != nil {
+			// Log error but continue (best-effort)
+			fmt.Fprintf(os.Stderr, "\nWarning: failed to store poll: %v\n", err)
+		} else {
+			// Store poll options with hashes
+			for i, optName := range pm.Poll.Options {
+				hash := hashPollOption(optName)
+				if err := a.db.UpsertPollOption(chatJID, pm.ID, i, optName, hash); err != nil {
+					fmt.Fprintf(os.Stderr, "\nWarning: failed to store poll option: %v\n", err)
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 func (a *App) buildDisplayText(ctx context.Context, pm wa.ParsedMessage) string {
@@ -424,4 +451,52 @@ func mediaLabel(mediaType string) string {
 	default:
 		return mt
 	}
+}
+
+func (a *App) handlePollVote(ctx context.Context, pm wa.ParsedMessage) error {
+	// Decrypt the vote
+	voteMsg, err := a.wa.DecryptPollVote(ctx, pm.PollVoteRaw)
+	if err != nil {
+		return fmt.Errorf("decrypt poll vote: %w", err)
+	}
+
+	// Extract poll reference from the vote message
+	pollRef := pm.PollVoteRaw.Message.GetPollUpdateMessage().GetPollCreationMessageKey()
+	if pollRef == nil {
+		return fmt.Errorf("no poll reference in vote")
+	}
+
+	pollMsgID := pollRef.GetID()
+	chatJID := pm.Chat.String()
+	voterJID := pm.SenderJID
+	if voterJID == "" {
+		voterJID = pm.Chat.String()
+	}
+
+	// Match vote hashes to option indices
+	selectedHashes := voteMsg.GetSelectedOptions()
+	selectedIndices := []int{}
+
+	for _, hash := range selectedHashes {
+		idx, _, err := a.db.LookupOptionByHash(chatJID, pollMsgID, hash)
+		if err != nil {
+			// Log warning: vote for unknown option (shouldn't happen unless poll not synced yet)
+			fmt.Fprintf(os.Stderr, "\nWarning: vote for unknown option (poll %s, hash %x)\n", pollMsgID, hash)
+			continue
+		}
+		selectedIndices = append(selectedIndices, idx)
+	}
+
+	if len(selectedIndices) == 0 {
+		return fmt.Errorf("no valid options in vote")
+	}
+
+	// Store the vote
+	return a.db.UpsertPollVote(chatJID, pollMsgID, voterJID, selectedIndices, pm.Timestamp)
+}
+
+func hashPollOption(optionName string) []byte {
+	// Import crypto/sha256 at top of file
+	hash := sha256.Sum256([]byte(optionName))
+	return hash[:]
 }

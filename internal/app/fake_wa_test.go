@@ -208,6 +208,10 @@ func (f *fakeWA) SendText(ctx context.Context, to types.JID, text string) (types
 	return types.MessageID("msgid"), nil
 }
 
+func (f *fakeWA) SendPoll(ctx context.Context, to types.JID, question string, options []string, selectableCount int) (types.MessageID, error) {
+	return types.MessageID("msgid"), nil
+}
+
 func (f *fakeWA) SendProtoMessage(ctx context.Context, to types.JID, msg *waProto.Message) (types.MessageID, error) {
 	return types.MessageID("msgid"), nil
 }
@@ -217,6 +221,10 @@ func (f *fakeWA) Upload(ctx context.Context, data []byte, mediaType whatsmeow.Me
 }
 
 func (f *fakeWA) DecryptReaction(ctx context.Context, reaction *events.Message) (*waProto.ReactionMessage, error) {
+	return nil, fmt.Errorf("not supported")
+}
+
+func (f *fakeWA) DecryptPollVote(ctx context.Context, vote *events.Message) (*waProto.PollVoteMessage, error) {
 	return nil, fmt.Errorf("not supported")
 }
 
