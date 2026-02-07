@@ -410,3 +410,118 @@ func TestGetPollResultsMultiSelect(t *testing.T) {
 		t.Fatalf("expected 2 selections, got %d", len(results.Votes[0].SelectedIndices))
 	}
 }
+
+func TestListPolls(t *testing.T) {
+	db := openTestDB(t)
+
+	chat1 := "123@g.us"
+	chat2 := "456@g.us"
+	createdAt1 := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
+	createdAt2 := time.Date(2024, 3, 2, 12, 0, 0, 0, time.UTC)
+	createdAt3 := time.Date(2024, 3, 3, 12, 0, 0, 0, time.UTC)
+
+	// Create chats
+	_ = db.UpsertChat(chat1, "group", "Group 1", createdAt1)
+	_ = db.UpsertChat(chat2, "group", "Group 2", createdAt2)
+
+	// Create polls in different chats
+	_ = db.UpsertPoll(chat1, "msg1", "Poll 1", 1, createdAt1)
+	_ = db.UpsertPoll(chat1, "msg2", "Poll 2", 1, createdAt2)
+	_ = db.UpsertPoll(chat2, "msg3", "Poll 3", 1, createdAt3)
+
+	// Add some votes to poll 1
+	_ = db.UpsertPollOption(chat1, "msg1", 0, "Option A", []byte{0x01})
+	_ = db.UpsertPollVote(chat1, "msg1", "voter1@s.whatsapp.net", []int{0}, createdAt1.Add(1*time.Minute))
+	_ = db.UpsertPollVote(chat1, "msg1", "voter2@s.whatsapp.net", []int{0}, createdAt1.Add(2*time.Minute))
+
+	// List all polls
+	allPolls, err := db.ListPolls("")
+	if err != nil {
+		t.Fatalf("ListPolls: %v", err)
+	}
+	if len(allPolls) != 3 {
+		t.Fatalf("expected 3 polls, got %d", len(allPolls))
+	}
+
+	// Should be sorted by created_at DESC (most recent first)
+	if allPolls[0].MsgID != "msg3" {
+		t.Fatalf("expected first poll to be msg3, got %q", allPolls[0].MsgID)
+	}
+
+	// Check vote count for poll 1
+	if allPolls[2].VoteCount != 2 {
+		t.Fatalf("expected poll 1 to have 2 votes, got %d", allPolls[2].VoteCount)
+	}
+
+	// Filter by chat JID
+	chat1Polls, err := db.ListPolls(chat1)
+	if err != nil {
+		t.Fatalf("ListPolls with filter: %v", err)
+	}
+	if len(chat1Polls) != 2 {
+		t.Fatalf("expected 2 polls for chat1, got %d", len(chat1Polls))
+	}
+
+	// Both should be from chat1
+	for _, p := range chat1Polls {
+		if p.ChatJID != chat1 {
+			t.Fatalf("expected chat JID %q, got %q", chat1, p.ChatJID)
+		}
+	}
+}
+
+func TestListPollsEmpty(t *testing.T) {
+	db := openTestDB(t)
+
+	polls, err := db.ListPolls("")
+	if err != nil {
+		t.Fatalf("ListPolls: %v", err)
+	}
+	if len(polls) != 0 {
+		t.Fatalf("expected 0 polls, got %d", len(polls))
+	}
+}
+
+func TestLookupPollChatJID(t *testing.T) {
+	db := openTestDB(t)
+
+	chat1 := "123@g.us"
+	chat2 := "456@g.us"
+	createdAt := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
+
+	// Create chats and polls
+	_ = db.UpsertChat(chat1, "group", "Group 1", createdAt)
+	_ = db.UpsertChat(chat2, "group", "Group 2", createdAt)
+	_ = db.UpsertPoll(chat1, "msg1", "Poll 1", 1, createdAt)
+	_ = db.UpsertPoll(chat2, "msg2", "Poll 2", 1, createdAt)
+
+	// Lookup by msg_id
+	chatJID, err := db.LookupPollChatJID("msg1")
+	if err != nil {
+		t.Fatalf("LookupPollChatJID: %v", err)
+	}
+	if chatJID != chat1 {
+		t.Fatalf("expected chat JID %q, got %q", chat1, chatJID)
+	}
+
+	// Lookup msg2
+	chatJID, err = db.LookupPollChatJID("msg2")
+	if err != nil {
+		t.Fatalf("LookupPollChatJID: %v", err)
+	}
+	if chatJID != chat2 {
+		t.Fatalf("expected chat JID %q, got %q", chat2, chatJID)
+	}
+}
+
+func TestLookupPollChatJIDNotFound(t *testing.T) {
+	db := openTestDB(t)
+
+	_, err := db.LookupPollChatJID("non-existent")
+	if err == nil {
+		t.Fatalf("expected error for non-existent poll")
+	}
+	if !IsNotFound(err) {
+		t.Fatalf("expected IsNotFound error, got %v", err)
+	}
+}

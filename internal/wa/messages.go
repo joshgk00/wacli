@@ -1,6 +1,7 @@
 package wa
 
 import (
+	"crypto/sha256"
 	"strings"
 	"time"
 
@@ -307,4 +308,11 @@ func displayTextForProto(m *waProto.Message) string {
 		}
 	}
 	return ""
+}
+
+// HashPollOption computes the SHA-256 hash of a poll option name.
+// This is used to match encrypted poll votes to their corresponding options.
+func HashPollOption(optionName string) []byte {
+	hash := sha256.Sum256([]byte(optionName))
+	return hash[:]
 }

@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"testing"
+
+	"github.com/steipete/wacli/internal/wa"
 )
 
 func TestHashPollOption(t *testing.T) {
@@ -41,10 +43,10 @@ func TestHashPollOption(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := hashPollOption(tt.optionName)
+			got := wa.HashPollOption(tt.optionName)
 
 			if !bytes.Equal(got, tt.wantHash) {
-				t.Fatalf("hashPollOption(%q) = %x, want %x", tt.optionName, got, tt.wantHash)
+				t.Fatalf("wa.HashPollOption(%q) = %x, want %x", tt.optionName, got, tt.wantHash)
 			}
 
 			// Verify hash length (SHA-256 produces 32 bytes)
@@ -59,11 +61,11 @@ func TestHashPollOptionConsistency(t *testing.T) {
 	// Hash should be deterministic (same input -> same output)
 	optionName := "Consistent Option"
 
-	hash1 := hashPollOption(optionName)
-	hash2 := hashPollOption(optionName)
+	hash1 := wa.HashPollOption(optionName)
+	hash2 := wa.HashPollOption(optionName)
 
 	if !bytes.Equal(hash1, hash2) {
-		t.Fatalf("hashPollOption not consistent: %x != %x", hash1, hash2)
+		t.Fatalf("wa.HashPollOption not consistent: %x != %x", hash1, hash2)
 	}
 }
 
@@ -72,8 +74,8 @@ func TestHashPollOptionUniqueness(t *testing.T) {
 	option1 := "Red"
 	option2 := "Blue"
 
-	hash1 := hashPollOption(option1)
-	hash2 := hashPollOption(option2)
+	hash1 := wa.HashPollOption(option1)
+	hash2 := wa.HashPollOption(option2)
 
 	if bytes.Equal(hash1, hash2) {
 		t.Fatalf("different options produced same hash")

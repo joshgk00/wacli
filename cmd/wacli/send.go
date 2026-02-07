@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"os"
 	"strings"
@@ -169,7 +168,7 @@ func newSendPollCmd(flags *rootFlags) *cobra.Command {
 			// Store poll metadata
 			_ = a.DB().UpsertPoll(chat.String(), string(msgID), question, maxSelectable, now)
 			for i, opt := range options {
-				hash := hashPollOption(opt)
+				hash := wa.HashPollOption(opt)
 				_ = a.DB().UpsertPollOption(chat.String(), string(msgID), i, opt, hash)
 			}
 
@@ -192,9 +191,4 @@ func newSendPollCmd(flags *rootFlags) *cobra.Command {
 	cmd.Flags().StringVar(&optionsRaw, "options", "", "comma-separated poll options")
 	cmd.Flags().IntVar(&maxSelectable, "max-selectable", 1, "max options a voter can select (0 = unlimited)")
 	return cmd
-}
-
-func hashPollOption(optionName string) []byte {
-	hash := sha256.Sum256([]byte(optionName))
-	return hash[:]
 }

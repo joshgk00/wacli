@@ -18,6 +18,7 @@ func newPollCmd(flags *rootFlags) *cobra.Command {
 		Short: "Poll operations",
 	}
 	cmd.AddCommand(newPollResultsCmd(flags))
+	cmd.AddCommand(newPollListCmd(flags))
 	return cmd
 }
 
@@ -39,7 +40,7 @@ func newPollResultsCmd(flags *rootFlags) *cobra.Command {
 			ctx, cancel := withTimeout(context.Background(), flags)
 			defer cancel()
 
-			a, lk, err := newApp(ctx, flags, true, false)
+			a, lk, err := newApp(ctx, flags, false, false)
 			if err != nil {
 				return err
 			}
@@ -70,6 +71,66 @@ func newPollResultsCmd(flags *rootFlags) *cobra.Command {
 	cmd.MarkFlagRequired("id")
 
 	return cmd
+}
+
+func newPollListCmd(flags *rootFlags) *cobra.Command {
+	var chatJID string
+
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List tracked polls",
+		Long:  "Display all polls being tracked in the database",
+		Example: `  wacli poll list
+  wacli poll list --chat 123456@g.us
+  wacli poll list --json`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx, cancel := withTimeout(context.Background(), flags)
+			defer cancel()
+
+			a, lk, err := newApp(ctx, flags, false, false)
+			if err != nil {
+				return err
+			}
+			defer closeApp(a, lk)
+
+			polls, err := a.DB().ListPolls(chatJID)
+			if err != nil {
+				return err
+			}
+
+			return displayPollList(polls, flags.asJSON)
+		},
+	}
+
+	cmd.Flags().StringVar(&chatJID, "chat", "", "Filter by chat JID (optional)")
+
+	return cmd
+}
+
+func displayPollList(polls []store.PollListItem, asJSON bool) error {
+	if asJSON {
+		return out.WriteJSON(os.Stdout, map[string]any{
+			"polls": polls,
+			"count": len(polls),
+		})
+	}
+
+	if len(polls) == 0 {
+		fmt.Fprintln(os.Stdout, "No polls found.")
+		return nil
+	}
+
+	fmt.Fprintf(os.Stdout, "\nFound %d poll(s):\n\n", len(polls))
+	for i, p := range polls {
+		fmt.Fprintf(os.Stdout, "[%d] %s\n", i+1, p.Question)
+		fmt.Fprintf(os.Stdout, "    Chat: %s\n", p.ChatJID)
+		fmt.Fprintf(os.Stdout, "    Message ID: %s\n", p.MsgID)
+		fmt.Fprintf(os.Stdout, "    Created: %s\n", p.CreatedAt.Format("2006-01-02 15:04:05"))
+		fmt.Fprintf(os.Stdout, "    Votes: %d\n", p.VoteCount)
+		fmt.Fprintln(os.Stdout)
+	}
+
+	return nil
 }
 
 func resolveVoterName(a *app.App, voterJID string) string {
@@ -141,10 +202,16 @@ func displayPollResults(results store.PollResults, asJSON bool) error {
 }
 
 func makeBar(count, total, width int) string {
-	if total == 0 {
+	if width <= 0 {
+		return ""
+	}
+	if total <= 0 || count <= 0 {
 		return strings.Repeat("░", width)
 	}
 	filled := int(float64(count) / float64(total) * float64(width))
+	if filled < 0 {
+		filled = 0
+	}
 	if filled > width {
 		filled = width
 	}

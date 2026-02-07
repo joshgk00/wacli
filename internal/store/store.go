@@ -426,6 +426,14 @@ type PollVote struct {
 	VotedAt         time.Time
 }
 
+type PollListItem struct {
+	ChatJID   string    `json:"chat_jid"`
+	MsgID     string    `json:"msg_id"`
+	Question  string    `json:"question"`
+	CreatedAt time.Time `json:"created_at"`
+	VoteCount int       `json:"vote_count"`
+}
+
 func unix(t time.Time) int64 {
 	if t.IsZero() {
 		return 0
@@ -1179,11 +1187,13 @@ func (d *DB) UpsertPollVote(chatJID, msgID, voterJID string, optionIndices []int
 }
 
 func (d *DB) LookupOptionByHash(chatJID, msgID string, hash []byte) (int, string, error) {
+	// First try exact match with chat_jid, then fallback to msg_id + hash only
+	// (handles JID format mismatches: @s.whatsapp.net vs @lid)
 	row := d.sql.QueryRow(`
 		SELECT option_index, option_name
 		FROM poll_options
-		WHERE chat_jid = ? AND msg_id = ? AND option_hash = ?
-	`, chatJID, msgID, hash)
+		WHERE msg_id = ? AND option_hash = ?
+	`, msgID, hash)
 
 	var index int
 	var name string
@@ -1306,7 +1316,49 @@ func (d *DB) GetPollResults(chatJID, msgID string) (PollResults, error) {
 	return results, nil
 }
 
+func (d *DB) ListPolls(chatJID string) ([]PollListItem, error) {
+	query := `
+		SELECT p.chat_jid, p.msg_id, p.question, p.created_at, COUNT(DISTINCT pv.voter_jid) as vote_count
+		FROM polls p
+		LEFT JOIN poll_votes pv ON p.chat_jid = pv.chat_jid AND p.msg_id = pv.msg_id
+		WHERE 1=1`
+	var args []interface{}
+	
+	if strings.TrimSpace(chatJID) != "" {
+		query += ` AND p.chat_jid = ?`
+		args = append(args, chatJID)
+	}
+	
+	query += ` GROUP BY p.chat_jid, p.msg_id, p.question, p.created_at ORDER BY p.created_at DESC`
+	
+	rows, err := d.sql.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	
+	var polls []PollListItem
+	for rows.Next() {
+		var p PollListItem
+		var createdAt int64
+		if err := rows.Scan(&p.ChatJID, &p.MsgID, &p.Question, &createdAt, &p.VoteCount); err != nil {
+			return nil, err
+		}
+		p.CreatedAt = fromUnix(createdAt)
+		polls = append(polls, p)
+	}
+	
+	return polls, rows.Err()
+}
+
 func (d *DB) HasFTS() bool { return d.ftsEnabled }
+
+// LookupPollChatJID resolves the stored chat JID for a poll by msg_id.
+func (d *DB) LookupPollChatJID(msgID string) (string, error) {
+	var chatJID string
+	err := d.sql.QueryRow(`SELECT chat_jid FROM polls WHERE msg_id = ?`, msgID).Scan(&chatJID)
+	return chatJID, err
+}
 
 func IsNotFound(err error) bool {
 	return errors.Is(err, sql.ErrNoRows)

@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"crypto/sha256"
 	"fmt"
 	"os"
 	"strings"
@@ -345,7 +344,7 @@ func (a *App) storeParsedMessage(ctx context.Context, pm wa.ParsedMessage) error
 		} else {
 			// Store poll options with hashes
 			for i, optName := range pm.Poll.Options {
-				hash := hashPollOption(optName)
+				hash := wa.HashPollOption(optName)
 				if err := a.db.UpsertPollOption(chatJID, pm.ID, i, optName, hash); err != nil {
 					fmt.Fprintf(os.Stderr, "\nWarning: failed to store poll option: %v\n", err)
 				}
@@ -467,7 +466,16 @@ func (a *App) handlePollVote(ctx context.Context, pm wa.ParsedMessage) error {
 	}
 
 	pollMsgID := pollRef.GetID()
-	chatJID := pm.Chat.String()
+	// Look up the poll's stored chat JID — vote events may use a different JID format
+	// (e.g. @lid vs @s.whatsapp.net), so we resolve from the polls table
+	chatJID, lookupErr := a.db.LookupPollChatJID(pollMsgID)
+	if lookupErr != nil || chatJID == "" {
+		// Fallback: try the poll ref's remote JID, then the vote event's chat
+		chatJID = pollRef.GetRemoteJID()
+		if chatJID == "" {
+			chatJID = pm.Chat.String()
+		}
+	}
 	voterJID := pm.SenderJID
 	if voterJID == "" {
 		voterJID = pm.Chat.String()
@@ -480,7 +488,6 @@ func (a *App) handlePollVote(ctx context.Context, pm wa.ParsedMessage) error {
 	for _, hash := range selectedHashes {
 		idx, _, err := a.db.LookupOptionByHash(chatJID, pollMsgID, hash)
 		if err != nil {
-			// Log warning: vote for unknown option (shouldn't happen unless poll not synced yet)
 			fmt.Fprintf(os.Stderr, "\nWarning: vote for unknown option (poll %s, hash %x)\n", pollMsgID, hash)
 			continue
 		}
@@ -493,10 +500,4 @@ func (a *App) handlePollVote(ctx context.Context, pm wa.ParsedMessage) error {
 
 	// Store the vote
 	return a.db.UpsertPollVote(chatJID, pollMsgID, voterJID, selectedIndices, pm.Timestamp)
-}
-
-func hashPollOption(optionName string) []byte {
-	// Import crypto/sha256 at top of file
-	hash := sha256.Sum256([]byte(optionName))
-	return hash[:]
 }
